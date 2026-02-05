@@ -143,33 +143,44 @@ async def main() -> None:
 
         # Сборка письма
         date_str: str = datetime.now().strftime("%d.%m.%Y")
-        subject: str = f"{SUBJECT_PREFIX} [{date_str}]"
+        time_str: str = datetime.now().strftime("%H:%M")
+        subject: str = f"{SUBJECT_PREFIX} [{date_str} {time_str}]"
 
         system_prompt = (
                 f"\n\n--- ИНСТРУКЦИЯ ДЛЯ AI (GEMINI) ---\n"
                 f"{AI_INSTRUCTIONS}\n\n"
                 f"-----------------------------------\n\n"
-                f"--- НАЧАЛО ДАННЫХ ({date_str}) ---\n"
+                f"--- НАЧАЛО ДАННЫХ ({date_str} - {time_str}) ---\n"
             )
 
         final_content: str = system_prompt + "\n\n".join(full_body)
         print(final_content)
         # Отправка
-        # msg: MIMEMultipart = MIMEMultipart()
-        # msg["From"] = GMAIL_USER
-        # msg["To"] = TO_EMAIL
-        # msg["Subject"] = subject
-        # msg.attach(MIMEText(final_content, "plain"))
+        msg: MIMEMultipart = MIMEMultipart()
+        msg["From"] = GMAIL_USER
+        msg["To"] = TO_EMAIL
+        msg["Subject"] = subject
+        msg.attach(MIMEText(final_content, "plain"))
 
-        # try:
-        #     print("📧 Отправляю письмо...")
-        #     server: smtplib.SMTP_SSL = smtplib.SMTP_SSL("smtp.gmail.com", 465)
-        #     server.login(GMAIL_USER, GMAIL_PASS)
-        #     server.send_message(msg)
-        #     server.quit()
-        #     print("✅ Успешно! Письмо отправлено.")
-        # except Exception as e:
-        #     print(f"❌ Ошибка отправки почты: {e}")
+        # Таймаут 60 сек; многие мобильные операторы блокируют SMTP (587/465)
+        smtp_timeout: int = 60
+        try:
+            print("📧 Отправляю письмо...")
+            try:
+                server = smtplib.SMTP("smtp.gmail.com", 587, timeout=smtp_timeout)
+                server.starttls()
+            except (OSError, TimeoutError):
+                # Пробуем порт 465 (SMTPS), если 587 заблокирован оператором
+                print("   Порт 587 недоступен, пробую 465...")
+                server = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=smtp_timeout)
+            print("Успешно подключились к SMTP")
+            server.login(GMAIL_USER, GMAIL_PASS)
+            server.send_message(msg)
+            server.quit()
+            print("✅ Успешно! Письмо отправлено.")
+        except Exception as e:
+            print(f"❌ Ошибка отправки почты: {e}")
+            print("   Подсказка: с мобильного интернета/хотспота оператор часто блокирует SMTP. Попробуйте с Wi‑Fi.")
 
 
 if __name__ == "__main__":
