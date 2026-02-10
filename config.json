@@ -1,13 +1,22 @@
 {
     "channels": [
         "EzraMorYoutubeShow",
-        "israeltoday"
+        // "israeltoday",
+        // "az_front",
+        // "ziv710",
+        // "firstreportsnews",
+        // "chtddd",
+        // "pellivert",
+        // "vatnoeboloto",
+        // "voinasordoy",
+        // "ukrinformator"
     ],
     "message_limit_per_channel": 50,
     "email_subject_prefix": "Daily Digest",
     "show_unread_count": true,
     "mark_as_read_after_fetch": true,
     "only_unread": false,
+    "output_mode": "email",
     "ai_instructions": [
         "СТАТУС: Ты — профессиональный ведущий вечерних новостей на радио.",
         "ТВОЯ ЗАДАЧА: Превратить сырой поток сообщений ниже в увлекательный новостной выпуск.",

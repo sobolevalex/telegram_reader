@@ -1,4 +1,5 @@
 import asyncio
+import re
 import smtplib
 import json
 import os
@@ -11,6 +12,8 @@ from typing import Any
 from telethon import TelegramClient
 from telethon.tl.functions.messages import GetPeerDialogsRequest
 from dotenv import load_dotenv
+import google.generativeai as genai
+import edge_tts
 
 # 1. Загружаем секреты из файла .env (если он есть)
 load_dotenv()
@@ -38,6 +41,7 @@ try:
             "mark_as_read_after_fetch", False
         )
         ONLY_UNREAD: bool = config.get("only_unread", False)
+        OUTPUT_MODE: str = config.get("output_mode", "email")  # "email" | "radio"
         # ОБРАБОТКА ИНСТРУКЦИЙ (СПИСОК -> СТРОКА)
         raw_instructions = config.get("ai_instructions", [])
         if isinstance(raw_instructions, list):
@@ -49,6 +53,113 @@ try:
 except FileNotFoundError:
     print("❌ Ошибка: Не найден файл config.json")
     exit(1)
+
+
+def filter_links(block: str) -> str:
+    """Удаляет из текста все ссылки: markdown [text](url) и голые URL (http/https/www)."""
+    # Markdown-ссылки: оставляем только текст внутри [], убираем (url)
+    block = re.sub(r"\[([^\]]*)\]\([^)]+\)", r"\1", block)
+    # Голые URL (http, https, www)
+    block = re.sub(r"https?://\S+|www\.\S+", "", block)
+    # Убираем лишние пробелы и переносы, оставшиеся после удаления URL
+    block = re.sub(r"  +", " ", block).strip()
+    return block
+
+
+def send_digest_email(final_content: str, subject: str) -> None:
+    """Создаёт письмо с дайджестом и отправляет его на TO_EMAIL."""
+    msg: MIMEMultipart = MIMEMultipart()
+    msg["From"] = GMAIL_USER
+    msg["To"] = TO_EMAIL
+    msg["Subject"] = subject
+    msg.attach(MIMEText(final_content, "plain"))
+
+    smtp_timeout: int = 60
+    try:
+        print("📧 Отправляю письмо...")
+        try:
+            server = smtplib.SMTP("smtp.gmail.com", 587, timeout=smtp_timeout)
+            server.starttls()
+        except (OSError, TimeoutError):
+            print("   Порт 587 недоступен, пробую 465...")
+            server = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=smtp_timeout)
+        server.login(GMAIL_USER, GMAIL_PASS)
+        server.send_message(msg)
+        server.quit()
+        print("✅ Успешно! Письмо отправлено.")
+    except Exception as e:
+        print(f"❌ Ошибка отправки почты: {e}")
+        print("   Подсказка: с мобильного интернета/хотспота оператор часто блокирует SMTP. Попробуйте с Wi‑Fi.")
+
+
+# Голос для TTS (радио-режим)
+RADIO_VOICE: str = "ru-RU-DmitryNeural"
+
+# Системный промпт для Gemini: текст под озвучку (без лишних формулировок)
+RADIO_SYSTEM_INSTRUCTION: str = """
+Ты — профессиональный радиоведущий новостного дайджеста.
+Твоя задача: прочитать предоставленные новости на трех языках (русский, иврит, украинский) и составить из них текст для озвучки на русском.
+
+Требования к тексту:
+1. Пиши ТОЛЬКО текст, который должен произнести диктор. Никаких "Вот ваш текст", "Сценарий" и т.д.
+2. Стиль: живой, разговорный, без канцеляризмов.
+3. Структура: приветствие → главные новости → блок технологий/разное → прощание.
+4. Цензура: игнорируй рекламу, крипту, просьбы подписаться.
+5. Язык текста: только русский.
+"""
+
+
+async def create_radio_episode(
+    final_content: str, client: TelegramClient
+) -> None:
+    """Генерирует сценарий через Gemini, озвучивает через edge_tts, отправляет в «Избранное»."""
+    gemini_key: str | None = os.getenv("GEMINI_KEY")
+    if not gemini_key:
+        print("❌ Для режима radio добавьте GEMINI_KEY в .env (aistudio.google.com)")
+        return
+
+    genai.configure(api_key=gemini_key)
+    model = genai.GenerativeModel(
+        model_name="gemini-3-flash-preview",
+        system_instruction=RADIO_SYSTEM_INSTRUCTION,
+    )
+
+    print("🧠 Gemini пишет сценарий эфира...")
+    try:
+        response = await model.generate_content_async(final_content)
+        script_text: str = response.text or ""
+        clean_script = script_text.replace("*", "").replace("#", "").strip()
+        if not clean_script:
+            print("❌ Gemini вернул пустой сценарий.")
+            return
+        print("✅ Сценарий готов.")
+    except Exception as e:
+        print(f"❌ Ошибка Gemini: {e}")
+        return
+
+    print("🎙️ Озвучиваю текст...")
+    output_file: str = "podcast.mp3"
+    try:
+        communicate = edge_tts.Communicate(clean_script, RADIO_VOICE)
+        await communicate.save(output_file)
+    except Exception as e:
+        print(f"❌ Ошибка TTS: {e}")
+        return
+
+    # print("🚀 Отправляю аудио в Избранное...")
+    # try:
+    #     await client.send_file(
+    #         "me",
+    #         output_file,
+    #         caption="🎙️ Вечерний дайджест",
+    #         voice_note=True,
+    #     )
+    # except Exception as e:
+    #     print(f"❌ Ошибка отправки в Telegram: {e}")
+    # finally:
+    #     if os.path.exists(output_file):
+    #         os.remove(output_file)
+    # print("🏁 Радио-эфир готов. Проверь «Избранное» в Telegram.")
 
 
 async def main() -> None:
@@ -121,6 +232,7 @@ async def main() -> None:
                         header += f" (непрочитанных в диалоге: {unread_count})"
                     header += "\n"
                     block = header + "\n\n".join(msgs)
+                    block = filter_links(block)
                     full_body.append(block)
                     total_count += len(msgs)
 
@@ -155,32 +267,11 @@ async def main() -> None:
 
         final_content: str = system_prompt + "\n\n".join(full_body)
         print(final_content)
-        # Отправка
-        msg: MIMEMultipart = MIMEMultipart()
-        msg["From"] = GMAIL_USER
-        msg["To"] = TO_EMAIL
-        msg["Subject"] = subject
-        msg.attach(MIMEText(final_content, "plain"))
-
-        # Таймаут 60 сек; многие мобильные операторы блокируют SMTP (587/465)
-        smtp_timeout: int = 60
-        try:
-            print("📧 Отправляю письмо...")
-            try:
-                server = smtplib.SMTP("smtp.gmail.com", 587, timeout=smtp_timeout)
-                server.starttls()
-            except (OSError, TimeoutError):
-                # Пробуем порт 465 (SMTPS), если 587 заблокирован оператором
-                print("   Порт 587 недоступен, пробую 465...")
-                server = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=smtp_timeout)
-            print("Успешно подключились к SMTP")
-            server.login(GMAIL_USER, GMAIL_PASS)
-            server.send_message(msg)
-            server.quit()
-            print("✅ Успешно! Письмо отправлено.")
-        except Exception as e:
-            print(f"❌ Ошибка отправки почты: {e}")
-            print("   Подсказка: с мобильного интернета/хотспота оператор часто блокирует SMTP. Попробуйте с Wi‑Fi.")
+        exit()
+        if OUTPUT_MODE == "radio":
+            await create_radio_episode(final_content, client)
+        else:
+            send_digest_email(final_content, subject)
 
 
 if __name__ == "__main__":
